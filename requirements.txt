@@ -1,0 +1,4 @@
+streamlit
+graphviz
+pypdf2
+python-docx
