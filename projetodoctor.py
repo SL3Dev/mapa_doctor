@@ -4,14 +4,15 @@ from PyPDF2 import PdfReader
 from docx import Document
 import tempfile
 import os
-from graphviz.backend import execute
+import re
+from graphviz import backend
 
 # --- Verificação de Instalação do Graphviz --- #
 def check_graphviz_installed():
     try:
-        execute.run_check(['dot', '-V'])
+        backend.execute.run_check(['dot', '-V'])
         return True
-    except execute.ExecutableNotFound:
+    except backend.ExecutableNotFound:
         return False
 
 GRAPHVIZ_INSTALLED = check_graphviz_installed()
@@ -64,39 +65,61 @@ def get_cor_relacao(relacao):
     return "#6B5B95"  # Cor padrão
 
 # --- Funções Aprimoradas --- #
+def processar_texto(texto):
+    """Normaliza o texto para análise"""
+    texto = re.sub(r'[^\w\sáéíóúâêîôûãõàèìòùäëïöüç]', ' ', texto, flags=re.IGNORECASE)
+    texto = re.sub(r'\s+', ' ', texto).strip()
+    return texto.lower()
+
 def extrair_texto(file):
     """Extrai texto de arquivos com tratamento de erro melhorado"""
     try:
         if file.type == "application/pdf":
             pdf = PdfReader(file)
-            return " ".join(page.extract_text() or "" for page in pdf.pages)
+            texto = " ".join(page.extract_text() or "" for page in pdf.pages)
+            return processar_texto(texto)
         elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
             doc = Document(file)
-            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            texto = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            return processar_texto(texto)
         elif file.type == "text/plain":
-            return file.read().decode("utf-8")
+            texto = file.read().decode("utf-8")
+            return processar_texto(texto)
         return ""
     except Exception as e:
         st.error(f"Erro ao extrair texto: {str(e)}")
         return ""
 
 def gerar_proposicoes_offline(texto):
-    """Gera relações com exemplos clínicos"""
-    termos_detectados = []
+    """Gera relações médicas a partir do texto de entrada de forma dinâmica"""
+    texto = texto.lower()
     proposicoes = []
+    termos_encontrados = False
     
-    for termo_principal in RELACOES_MEDICAS:
-        termo_sem_icone = termo_principal.split()[-1]
-        
-        if termo_sem_icone.lower() in texto.lower():
-            termos_detectados.append(termo_principal)
-            
-            for relacao, termos in RELACOES_MEDICAS[termo_principal].items():
+    # Dicionário de mapeamento de termos sem emojis
+    termos_mapeamento = {
+        "lesão celular": "🦠 Lesão Celular",
+        "lesao celular": "🦠 Lesão Celular",
+        "hipóxia": "🫁 Hipóxia",
+        "hipoxia": "🫁 Hipóxia",
+        "inflamação": "🔥 Inflamação",
+        "inflamacao": "🔥 Inflamação",
+        "necrose": "💀 Necrose",
+        "apoptose": "⚰️ Apoptose"
+    }
+    
+    # Verifica cada termo médico no texto
+    for termo_sem_icone, termo_com_icone in termos_mapeamento.items():
+        if termo_sem_icone in texto:
+            termos_encontrados = True
+            # Adiciona todas as relações para este termo
+            for relacao, termos in RELACOES_MEDICAS[termo_com_icone].items():
                 for termo in termos:
-                    proposicoes.append(f"{termo_principal} -> {relacao} -> {termo}")
+                    proposicoes.append(f"{termo_com_icone} -> {relacao} -> {termo}")
     
-    if not termos_detectados:
-        st.warning("Nenhum termo médico detectado. Usando exemplos pré-definidos.")
+    # Se não encontrou termos médicos, usa exemplos pré-definidos
+    if not termos_encontrados:
+        st.warning("Nenhum termo médico relevante detectado. Mostrando exemplos genéricos.")
         for termo_principal in RELACOES_MEDICAS:
             for relacao, termos in RELACOES_MEDICAS[termo_principal].items():
                 for termo in termos:
@@ -134,7 +157,6 @@ def criar_mapa_avancado(proposicoes, orientacao="retrato"):
     if not proposicoes:
         return grafo
 
-    # Agrupar relações por conceito principal
     conceitos = {}
     for linha in proposicoes.split("\n"):
         if "->" in linha:
@@ -145,7 +167,6 @@ def criar_mapa_avancado(proposicoes, orientacao="retrato"):
                     conceitos[origem] = []
                 conceitos[origem].append((relacao, destino))
 
-    # Criar subgrafos para organização
     for conceito, relacoes in conceitos.items():
         with grafo.subgraph(name=f"cluster_{conceito}") as sub:
             sub.attr(
@@ -157,7 +178,6 @@ def criar_mapa_avancado(proposicoes, orientacao="retrato"):
                 fontcolor="#333333"
             )
             
-            # Nó principal com estilo diferente
             sub.node(conceito, 
                     shape="ellipse", 
                     fillcolor="#e6f3ff", 
@@ -167,7 +187,6 @@ def criar_mapa_avancado(proposicoes, orientacao="retrato"):
             for relacao, destino in relacoes:
                 cor = get_cor_relacao(relacao)
                 
-                # Estilo diferente para exemplos clínicos
                 if "exemplo" in relacao:
                     sub.node(destino, 
                             shape="note", 
@@ -184,7 +203,6 @@ def criar_mapa_avancado(proposicoes, orientacao="retrato"):
 
     return grafo
 
-# --- Funções de Exportação Aprimoradas --- #
 def exportar_para_pdf(grafo, orientacao="retrato"):
     """Exporta para PDF com metadados médicos"""
     rankdir = "TB" if orientacao == "retrato" else "LR"
@@ -218,18 +236,15 @@ def exportar_para_word(grafo, orientacao="retrato"):
     try:
         grafo.render(img_path.replace('.png', ''), format='png', cleanup=True)
         
+        if not os.path.exists(img_path):
+            raise FileNotFoundError("Falha ao gerar imagem do gráfico")
+        
         doc = Document()
         doc.add_heading('Mapa Conceitual Médico', level=1)
-        
-        # Cabeçalho profissional
         doc.add_paragraph('Gerado por:', style='Heading 2')
         doc.add_paragraph('Sistema de Mapeamento Conceitual Médico v2.0')
         doc.add_paragraph(f'Orientação: {orientacao.capitalize()}')
-        
-        # Adiciona imagem centralizada
         doc.add_picture(img_path, width=docx.shared.Inches(6))
-        
-        # Rodapé com referências
         doc.add_paragraph().add_run('Referências:').bold = True
         doc.add_paragraph('- Robbins & Cotran: Bases Patológicas das Doenças')
         doc.add_paragraph('- Guyton & Hall: Tratado de Fisiologia Médica')
@@ -249,7 +264,6 @@ def exportar_para_word(grafo, orientacao="retrato"):
         if os.path.exists(temp_path):
             os.unlink(temp_path)
 
-# --- Interface Streamlit Aprimorada --- #
 def main():
     st.set_page_config(
         page_title="Mapa Conceitual Médico Avançado",
@@ -258,7 +272,6 @@ def main():
         initial_sidebar_state="expanded"
     )
 
-    # Sidebar com informações úteis
     with st.sidebar:
         st.title("🩺 Ajuda Médica")
         st.markdown("""
@@ -279,7 +292,6 @@ def main():
             3. Reinicie o aplicativo
             """)
 
-    # Página principal
     st.title("🧠 Mapa Conceitual Médico Avançado")
     st.markdown("""
     *Ferramenta para organização visual de conceitos médicos*  
@@ -290,39 +302,43 @@ def main():
     4. Exporte para estudo ou apresentação  
     """)
 
-    # Entradas do usuário
     tab1, tab2 = st.tabs(["✍️ Digitar Texto", "📂 Upload de Arquivos"])
     
     with tab1:
         texto_manual = st.text_area("Cole texto médico aqui:", height=300,
-                                  placeholder="Ex: Lesões celulares podem ser reversíveis (esteatose) ou irreversíveis (necrose)...")
+                                  placeholder="Ex: Lesões celulares podem ser reversíveis (esteatose) ou irreversíveis (necrose)...",
+                                  key="texto_input")
     
     with tab2:
         arquivos = st.file_uploader("Selecione arquivos (PDF, DOCX, TXT)", 
                                   type=["pdf", "docx", "txt"],
-                                  accept_multiple_files=True)
+                                  accept_multiple_files=True,
+                                  key="file_uploader")
 
-    # Configurações avançadas
     with st.expander("⚙️ Configurações Avançadas"):
         col1, col2 = st.columns(2)
         with col1:
-            orientacao = st.radio("Orientação:", ["Retrato", "Paisagem"], index=0)
+            orientacao = st.radio("Orientação:", ["Retrato", "Paisagem"], index=0, key="orientacao")
         with col2:
             if GRAPHVIZ_INSTALLED:
                 layout = st.selectbox(
                     "Algoritmo de Layout:",
                     ["dot", "neato", "fdp", "sfdp", "twopi", "circo"],
-                    index=0
+                    index=0,
+                    key="layout"
                 )
 
-    # Processamento
-    if st.button("🔄 Gerar Mapa Conceitual", type="primary", use_container_width=True):
-        conteudo_total = texto_manual + "\n" if texto_manual else ""
+    if st.button("🔄 Gerar Mapa Conceitual", type="primary", use_container_width=True, key="gerar_mapa"):
+        conteudo_total = ""
+        if texto_manual:
+            conteudo_total += processar_texto(texto_manual) + "\n"
         
         if arquivos:
             with st.spinner("Processando arquivos..."):
                 for arquivo in arquivos:
-                    conteudo_total += extrair_texto(arquivo) + "\n"
+                    conteudo = extrair_texto(arquivo)
+                    if conteudo:
+                        conteudo_total += conteudo + "\n"
         
         if not conteudo_total.strip():
             st.warning("Por favor, insira texto ou faça upload de arquivos!")
@@ -333,11 +349,9 @@ def main():
         
         st.success("Análise concluída! Visualizando relações...")
         
-        # Exibe relações
         with st.expander("📋 Relações Identificadas"):
             st.code(proposicoes)
         
-        # Mostra mapa
         st.subheader("🧬 Visualização do Mapa Conceitual")
         grafo = criar_mapa_avancado(proposicoes, orientacao.lower())
         
@@ -346,7 +360,6 @@ def main():
         
         st.graphviz_chart(grafo, use_container_width=True)
         
-        # Botões de download
         st.subheader("💾 Opções de Exportação")
         
         col1, col2, col3 = st.columns(3)
@@ -399,12 +412,11 @@ def main():
                     use_container_width=True
                 )
 
-    # Seção de exemplos pré-definidos
     with st.expander("🧪 Exemplos Clínicos Prontos"):
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("Caso 1: Lesão Hepática"):
+            if st.button("Caso 1: Lesão Hepática", key="exemplo1"):
                 st.session_state.texto_exemplo = """
                 Paciente masculino, 45 anos, etilista crônico apresenta:
                 - 🦠 Lesão celular hepática 🔄 Reversível (esteatose)
@@ -413,18 +425,19 @@ def main():
                 """
         
         with col2:
-            if st.button("Caso 2: Infarto do Miocárdio"):
+            if st.button("Caso 2: Infarto do Miocárdio", key="exemplo2"):
                 st.session_state.texto_exemplo = """
                 Paciente feminino, 60 anos, diabética:
                 - 🫁 Hipóxia miocárdica por aterosclerose
                 - 🔥 Estresse oxidativo → 💀 Necrose 🪨 Coagulativa
-                - ⚠️ Complicação: � Fibrose cardíaca
+                - ⚠️ Complicação: Fibrose cardíaca
                 """
         
-        if hasattr(st.session_state, 'texto_exemplo'):
+        if 'texto_exemplo' in st.session_state:
             texto_manual = st.text_area("Texto de exemplo:", 
                                       value=st.session_state.texto_exemplo, 
-                                      height=150)
+                                      height=150,
+                                      key="texto_exemplo_area")
 
 if __name__ == "__main__":
     main()
